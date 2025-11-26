@@ -1,1062 +1,691 @@
 // libs/analyzeReactComponent.ts
 import { parse } from "@babel/parser";
-import type {
-  File,
-  Node,
-  JSXElement,
-  JSXFragment,
-  JSXIdentifier,
-  JSXMemberExpression,
-  JSXNamespacedName,
-  JSXAttribute,
-  JSXExpressionContainer,
-  CallExpression,
-  Identifier,
-  FunctionDeclaration,
-  ArrowFunctionExpression,
-  ObjectPattern,
-  ExportDefaultDeclaration,
-  FunctionExpression,
-} from "@babel/types";
-import { isNode, walk, collectIdentifierNames } from "./astUtils";
+import traverse, { type NodePath } from "@babel/traverse";
+import * as t from "@babel/types";
 
-export type RenderCategory = "independent" | "render-decision" | "post-render";
-
-export type RenderKind =
-  | "useRef"
+export type HookKind =
   | "useState"
-  | "globalVariable"
-  | "recoil"
-  | "zustand"
-  | "redux"
-  | "useMemo"
-  | "useCallback"
+  | "useRef"
+  | "useReducer"
   | "useEffect"
   | "useLayoutEffect"
-  | "reactQuery"
-  | "fetch"
-  | "axios";
+  | "useCallback"
+  | "useMemo"
+  | "zustand"
+  | "react-query"
+  | "custom";
 
-export interface RenderNode {
+export type StateScope = "local" | "global" | "external";
+
+export interface AnalyzedHook {
   id: string;
   name: string;
-  kind: RenderKind;
-  category: RenderCategory;
-  description?: string;
+  hookKind: HookKind;
+  scope: StateScope;
+  definedAt: {
+    line: number;
+    column: number;
+  } | null;
+  meta?: Record<string, unknown>;
 }
 
-export interface StateNode extends RenderNode {
-  kind: "useState" | "recoil" | "zustand" | "redux";
-  stateName: string;
-  setterName?: string;
-}
-
-// 컴포넌트 내부 변수 노드 정의.
-export interface VariableNode {
-  id: string;
+export interface EffectDependency {
   name: string;
-  description?: string;
+  isGlobal: boolean;
 }
 
-export interface JsxTreeNode {
+export interface AnalyzedEffect {
   id: string;
-  name: string;
-  children: JsxTreeNode[];
+  hookKind: "useEffect" | "useLayoutEffect";
+  dependencies: EffectDependency[];
+  setters: string[];
+  refs: string[];
+  definedAt: {
+    line: number;
+    column: number;
+  } | null;
 }
 
-export interface StateToJsxEdge {
-  stateName: string;
-  jsxNodeId: string;
-}
-
-export interface RefToJsxEdge {
-  refName: string;
-  jsxNodeId: string;
-}
-
-export interface PropToJsxEdge {
-  propName: string;
-  jsxNodeId: string;
-}
-
-// 변수 의존 관계: fromName → toVariableName
-export interface VariableDependencyEdge {
-  fromName: string;
-  toVariableName: string;
-}
-
-// 변수 → JSX 엣지.
-export interface VariableToJsxEdge {
-  variableName: string;
-  jsxNodeId: string;
-}
-
-// useEffect 의존성 및 변경 사항 메타 데이터 정의.
-export interface EffectMeta {
-  effectId: string;
+export interface AnalyzedCallback {
+  id: string;
+  name: string | null;
   dependencies: string[];
-  writesStates: string[];
-  writesRefs: string[];
+  setters: string[];
+  definedAt: {
+    line: number;
+    column: number;
+  } | null;
 }
 
-export interface EffectDependencyEdge {
-  stateName: string;
-  effectId: string;
-}
-
-export interface EffectToStateEdge {
-  effectId: string;
-  stateName: string;
-}
-
-export interface EffectToRefEdge {
-  effectId: string;
-  refName: string;
-}
-
-// 외부 호출 → 위로 화살표 처리를 위한 구조 정의.
-export interface ExternalCallEdge {
-  fromNodeId: string;
-  label: string;
-}
-
-// 리액트 쿼리, fetch, axios 호출에 대한 메타 정의.
-export interface NetworkCallMeta {
-  nodeId: string;
-  kind: "reactQuery" | "fetch" | "axios";
-  name: string;
+export interface AnalyzedJsxNode {
+  id: string;
+  component: string;
+  depth: number;
+  props: string[];
+  definedAt: {
+    line: number;
+    column: number;
+  } | null;
 }
 
 export interface ComponentAnalysis {
-  independentNodes: RenderNode[];
-  renderDecisionNodes: StateNode[];
-  postRenderNodes: RenderNode[];
-  jsxTree: JsxTreeNode | null;
+  source: string;
+  fileName?: string;
+  componentName: string | null;
 
-  // JSX 관련 엣지.
-  stateToJsxEdges: StateToJsxEdge[];
-  refToJsxEdges: RefToJsxEdge[];
-  propToJsxEdges: PropToJsxEdge[];
+  hooks: AnalyzedHook[];
+  effects: AnalyzedEffect[];
+  callbacks: AnalyzedCallback[];
+  jsxNodes: AnalyzedJsxNode[];
 
-  // 변수 관련 노드/엣지.
-  variableNodes: VariableNode[];
-  variableDependencyEdges: VariableDependencyEdge[];
-  variableToJsxEdges: VariableToJsxEdge[];
+  meta: {
+    exportedComponents: string[];
+    defaultExport: string | null;
+  };
 
-  // useState 세터 흐름.
-  setterFlows: { fromSetter: string; toState: string }[];
-
-  // useEffect 관련 엣지.
-  effectMetas: EffectMeta[];
-  effectDependencyEdges: EffectDependencyEdge[];
-  effectToStateEdges: EffectToStateEdge[];
-  effectToRefEdges: EffectToRefEdge[];
-
-  // 외부 호출 화살표 정의.
-  externalCallEdges: ExternalCallEdge[];
-
-  // 네트워크 호출 메타 정보.
-  networkCalls: NetworkCallMeta[];
-
+  // UI에서 analysis.errors.length, analysis.errors.map 사용
   errors: string[];
 }
 
-// JSX 트리를 구성하는 함수 정의.
-function buildJsxTree(
-  rootNode: Node | null,
-  idMap: Map<Node, string>,
-): JsxTreeNode | null {
-  if (!rootNode) {
-    return null;
-  }
+/**
+ * 소스 → AST
+ */
+function parseSourceToAst(source: string): t.File {
+  return parse(source, {
+    sourceType: "module",
+    plugins: ["jsx", "typescript"],
+  });
+}
 
-  if (rootNode.type !== "JSXElement" && rootNode.type !== "JSXFragment") {
-    return null;
-  }
+/**
+ * export 정보 수집
+ */
+interface ExportInfo {
+  defaultExport: string | null;
+  namedExports: string[];
+}
 
-  let counter = 0;
-  const createId = () => `jsx-${counter++}`;
-
-  const getNameFromJsx = (
-    openingName: JSXIdentifier | JSXMemberExpression | JSXNamespacedName,
-  ): string => {
-    if (openingName.type === "JSXIdentifier") {
-      return openingName.name;
-    }
-    if (openingName.type === "JSXNamespacedName") {
-      const ns = openingName.namespace.name;
-      const local = openingName.name.name;
-      return `${ns}:${local}`;
-    }
-
-    const parts: string[] = [];
-    let current: JSXMemberExpression | null = openingName;
-
-    while (current) {
-      if (current.property.type === "JSXIdentifier") {
-        parts.unshift(current.property.name);
-      }
-      if (current.object.type === "JSXIdentifier") {
-        parts.unshift(current.object.name);
-        break;
-      }
-      if (current.object.type === "JSXMemberExpression") {
-        current = current.object;
-      } else {
-        break;
-      }
-    }
-    return parts.length > 0 ? parts.join(".") : "Unknown";
+function collectExportedComponents(ast: t.File): ExportInfo {
+  const info: ExportInfo = {
+    defaultExport: null,
+    namedExports: [],
   };
 
-  const build = (node: Node): JsxTreeNode | null => {
-    if (node.type === "JSXElement") {
-      const jsxNode = node as JSXElement;
-      const opening = jsxNode.openingElement;
-      const name = getNameFromJsx(opening.name);
-      const id = createId();
-      idMap.set(node, id);
-
-      const children: JsxTreeNode[] = [];
-      jsxNode.children.forEach((child) => {
-        if (isNode(child)) {
-          const builtChild = build(child);
-          if (builtChild) {
-            children.push(builtChild);
-          }
+  traverse(ast, {
+    ExportDefaultDeclaration(path: NodePath<t.ExportDefaultDeclaration>) {
+      const decl = path.node.declaration;
+      if (t.isIdentifier(decl)) {
+        info.defaultExport = decl.name;
+      } else if (t.isFunctionDeclaration(decl) && decl.id) {
+        info.defaultExport = decl.id.name;
+      }
+    },
+    ExportNamedDeclaration(path: NodePath<t.ExportNamedDeclaration>) {
+      const decl = path.node.declaration;
+      if (t.isFunctionDeclaration(decl) && decl.id) {
+        info.namedExports.push(decl.id.name);
+      }
+      path.node.specifiers.forEach((spec) => {
+        if (t.isExportSpecifier(spec) && t.isIdentifier(spec.exported)) {
+          info.namedExports.push(spec.exported.name);
         }
       });
+    },
+  });
 
-      return { id, name, children };
-    }
-
-    if (node.type === "JSXFragment") {
-      const fragmentNode = node as JSXFragment;
-      const id = createId();
-      idMap.set(node, id);
-
-      const children: JsxTreeNode[] = [];
-      fragmentNode.children.forEach((child) => {
-        if (isNode(child)) {
-          const builtChild = build(child);
-          if (builtChild) {
-            children.push(builtChild);
-          }
-        }
-      });
-
-      return { id, name: "Fragment", children };
-    }
-
-    return null;
-  };
-
-  return build(rootNode);
+  return info;
 }
 
-// JSX 내부에서 사용된 식별자를 분석하여 state/ref/props/variable → JSX 엣지 생성.
-function analyzeJsxUsages(
-  rootNode: Node | null,
-  jsxIdMap: Map<Node, string>,
-  stateNames: Set<string>,
-  refNames: Set<string>,
-  propNames: Set<string>,
-  variableNames: Set<string>,
-): {
-  stateToJsxEdges: StateToJsxEdge[];
-  refToJsxEdges: RefToJsxEdge[];
-  propToJsxEdges: PropToJsxEdge[];
-  variableToJsxEdges: VariableToJsxEdge[];
-} {
-  const stateToJsxEdges: StateToJsxEdge[] = [];
-  const refToJsxEdges: RefToJsxEdge[] = [];
-  const propToJsxEdges: PropToJsxEdge[] = [];
-  const variableToJsxEdges: VariableToJsxEdge[] = [];
+/**
+ * 주요 컴포넌트 선택
+ */
+function pickPrimaryComponent(
+  exportInfo: ExportInfo,
+  fileName?: string,
+): string | null {
+  if (exportInfo.defaultExport) return exportInfo.defaultExport;
+  if (exportInfo.namedExports.length === 1) return exportInfo.namedExports[0];
 
-  const stateEdgeSet = new Set<string>();
-  const refEdgeSet = new Set<string>();
-  const propEdgeSet = new Set<string>();
-  const variableEdgeSet = new Set<string>();
-
-  if (!rootNode) {
-    return {
-      stateToJsxEdges,
-      refToJsxEdges,
-      propToJsxEdges,
-      variableToJsxEdges,
-    };
+  if (fileName) {
+    const base = fileName.replace(/\.[^/.]+$/, "");
+    const matched = exportInfo.namedExports.find((name) => name === base);
+    if (matched) return matched;
   }
 
-  const visitJsxNode = (node: Node): void => {
-    if (node.type !== "JSXElement" && node.type !== "JSXFragment") {
-      return;
-    }
-
-    const jsxId = jsxIdMap.get(node);
-    if (!jsxId) {
-      return;
-    }
-
-    const identifiers = new Set<string>();
-
-    if (node.type === "JSXElement") {
-      const jsxNode = node as JSXElement;
-
-      // props 속성 값 내부 식별자 수집.
-      jsxNode.openingElement.attributes.forEach((attr) => {
-        if (
-          attr.type === "JSXAttribute" &&
-          attr.value &&
-          attr.value.type === "JSXExpressionContainer"
-        ) {
-          const exprContainer = attr.value as JSXExpressionContainer;
-          if (exprContainer.expression && isNode(exprContainer.expression)) {
-            collectIdentifierNames(exprContainer.expression).forEach((name) => {
-              identifiers.add(name);
-            });
-          }
-        } else if (
-          attr.type === "JSXSpreadAttribute" &&
-          isNode(attr.argument)
-        ) {
-          // {...props} 형태의 spread attribute 분석.
-          collectIdentifierNames(attr.argument).forEach((name) => {
-            identifiers.add(name);
-          });
-        }
-      });
-
-      // 자식 JSXExpressionContainer 내부 식별자 수집.
-      jsxNode.children.forEach((child) => {
-        if (
-          child.type === "JSXExpressionContainer" &&
-          isNode(child.expression)
-        ) {
-          collectIdentifierNames(child.expression).forEach((name) => {
-            identifiers.add(name);
-          });
-        }
-      });
-    } else if (node.type === "JSXFragment") {
-      const frag = node as JSXFragment;
-      frag.children.forEach((child) => {
-        if (
-          child.type === "JSXExpressionContainer" &&
-          isNode(child.expression)
-        ) {
-          collectIdentifierNames(child.expression).forEach((name) => {
-            identifiers.add(name);
-          });
-        }
-      });
-    }
-
-    identifiers.forEach((name) => {
-      if (stateNames.has(name)) {
-        const key = `${name}|${jsxId}`;
-        if (!stateEdgeSet.has(key)) {
-          stateEdgeSet.add(key);
-          stateToJsxEdges.push({
-            stateName: name,
-            jsxNodeId: jsxId,
-          });
-        }
-      }
-      if (refNames.has(name)) {
-        const key = `${name}|${jsxId}`;
-        if (!refEdgeSet.has(key)) {
-          refEdgeSet.add(key);
-          refToJsxEdges.push({
-            refName: name,
-            jsxNodeId: jsxId,
-          });
-        }
-      }
-      if (propNames.has(name)) {
-        const key = `${name}|${jsxId}`;
-        if (!propEdgeSet.has(key)) {
-          propEdgeSet.add(key);
-          propToJsxEdges.push({
-            propName: name,
-            jsxNodeId: jsxId,
-          });
-        }
-      }
-      if (variableNames.has(name)) {
-        const key = `${name}|${jsxId}`;
-        if (!variableEdgeSet.has(key)) {
-          variableEdgeSet.add(key);
-          variableToJsxEdges.push({
-            variableName: name,
-            jsxNodeId: jsxId,
-          });
-        }
-      }
-    });
-  };
-
-  walk(rootNode, (node) => {
-    if (node.type === "JSXElement" || node.type === "JSXFragment") {
-      visitJsxNode(node);
-    }
-  });
-
-  return { stateToJsxEdges, refToJsxEdges, propToJsxEdges, variableToJsxEdges };
+  return exportInfo.namedExports[0] ?? null;
 }
 
-// 메인 컴포넌트 후보를 찾는 유틸 함수 정의.
-interface ComponentCandidate {
-  name: string;
-  fnNode: FunctionDeclaration | ArrowFunctionExpression | FunctionExpression;
-  paramPropsNames: Set<string>;
-  rootJsx: Node | null;
-}
+/**
+ * 훅 이름 → HookKind
+ */
+function classifyHookKind(
+  calleeName: string,
+  importSource: string | null,
+): HookKind {
+  if (calleeName === "useState") return "useState";
+  if (calleeName === "useRef") return "useRef";
+  if (calleeName === "useReducer") return "useReducer";
+  if (calleeName === "useEffect") return "useEffect";
+  if (calleeName === "useLayoutEffect") return "useLayoutEffect";
+  if (calleeName === "useCallback") return "useCallback";
+  if (calleeName === "useMemo") return "useMemo";
 
-function extractPropsFromParams(params: (Node | undefined)[]): Set<string> {
-  const result = new Set<string>();
-  if (!params.length) return result;
-
-  const param = params[0];
-  if (!param) return result;
-
-  if (param.type === "ObjectPattern") {
-    const obj = param as ObjectPattern;
-    obj.properties.forEach((prop) => {
-      if (prop.type === "ObjectProperty" && prop.key.type === "Identifier") {
-        result.add(prop.key.name);
-      }
-    });
+  // Zustand 추정
+  if (
+    calleeName.startsWith("use") &&
+    calleeName.endsWith("Store") &&
+    importSource &&
+    importSource.includes("zustand")
+  ) {
+    return "zustand";
   }
 
-  return result;
-}
-
-function findMainComponent(ast: File): ComponentCandidate | null {
-  const candidates: ComponentCandidate[] = [];
-
-  const addCandidate = (
-    name: string,
-    fnNode: FunctionDeclaration | ArrowFunctionExpression | FunctionExpression,
-    paramPropsNames: Set<string>,
-  ): void => {
-    let rootJsx: Node | null = null;
-
-    // 함수 전체를 순회하면서 첫 JSXElement/JSXFragment를 포함하는 return을 찾음.
-    walk(fnNode as unknown as Node, (node) => {
-      if (
-        node.type === "ReturnStatement" &&
-        node.argument &&
-        isNode(node.argument) &&
-        !rootJsx
-      ) {
-        const arg = node.argument;
-
-        // 1차: argument 자체가 JSX인 경우.
-        if (arg.type === "JSXElement" || arg.type === "JSXFragment") {
-          rootJsx = arg;
-          return;
-        }
-
-        // 2차: argument 내부를 다시 순회하면서 JSX 탐색.
-        walk(arg as unknown as Node, (inner) => {
-          if (
-            !rootJsx &&
-            (inner.type === "JSXElement" || inner.type === "JSXFragment")
-          ) {
-            rootJsx = inner;
-          }
-        });
-      }
-    });
-
-    if (rootJsx) {
-      candidates.push({ name, fnNode, paramPropsNames, rootJsx });
-    }
-  };
-
-  ast.program.body.forEach((stmt) => {
-    // 일반 함수 선언: function Page() {}
-    if (stmt.type === "FunctionDeclaration" && stmt.id) {
-      const name = stmt.id.name;
-      if (!/^[A-Z]/.test(name)) {
-        return;
-      }
-      const paramPropsNames = extractPropsFromParams(
-        stmt.params as unknown as Node[],
-      );
-      addCandidate(name, stmt, paramPropsNames);
-    }
-
-    // const Page = () => {}
-    if (stmt.type === "VariableDeclaration") {
-      stmt.declarations.forEach((decl) => {
-        if (
-          decl.type === "VariableDeclarator" &&
-          decl.id.type === "Identifier" &&
-          decl.init &&
-          decl.init.type === "ArrowFunctionExpression"
-        ) {
-          const id = decl.id as Identifier;
-          const name = id.name;
-          if (!/^[A-Z]/.test(name)) {
-            return;
-          }
-
-          const arrow = decl.init as ArrowFunctionExpression;
-          const paramPropsNames = extractPropsFromParams(
-            arrow.params as unknown as Node[],
-          );
-
-          addCandidate(name, arrow, paramPropsNames);
-        }
-      });
-    }
-
-    // export default function Page() {} / export default () => {}
-    if (stmt.type === "ExportDefaultDeclaration") {
-      const exportDecl = stmt as ExportDefaultDeclaration;
-      const decl = exportDecl.declaration;
-
-      if (decl.type === "FunctionDeclaration") {
-        const fn = decl as FunctionDeclaration;
-        const name = fn.id?.name ?? "DefaultExportComponent";
-        if (/^[A-Z]/.test(name)) {
-          const paramPropsNames = extractPropsFromParams(
-            fn.params as unknown as Node[],
-          );
-          addCandidate(name, fn, paramPropsNames);
-        }
-      } else if (decl.type === "ArrowFunctionExpression") {
-        const arrow = decl as ArrowFunctionExpression;
-        const name = "DefaultExportComponent";
-        const paramPropsNames = extractPropsFromParams(
-          arrow.params as unknown as Node[],
-        );
-        addCandidate(name, arrow, paramPropsNames);
-      } else if (decl.type === "FunctionExpression") {
-        const fn = decl as FunctionExpression;
-        const name = fn.id?.name ?? "DefaultExportComponent";
-        if (/^[A-Z]/.test(name)) {
-          const paramPropsNames = extractPropsFromParams(
-            fn.params as unknown as Node[],
-          );
-          addCandidate(name, fn, paramPropsNames);
-        }
-      }
-    }
-  });
-
-  if (candidates.length === 0) {
-    return null;
+  // React Query 추정
+  if (
+    importSource &&
+    (importSource.includes("reactQuery") ||
+      importSource.includes("@tanstack/react-query"))
+  ) {
+    const lower = calleeName.toLowerCase();
+    if (lower.includes("mutation")) return "react-query";
+    if (lower.includes("query")) return "react-query";
   }
 
-  // 우선 첫 번째 후보를 사용.
-  return candidates[0];
+  return "custom";
 }
 
-export function analyzeReactComponent(source: string): ComponentAnalysis {
-  const errors: string[] = [];
-  let ast: File;
+/**
+ * import 맵
+ */
+interface ImportMap {
+  [localName: string]: string;
+}
 
-  try {
-    ast = parse(source, {
-      sourceType: "module",
-      plugins: ["typescript", "jsx"],
-    }) as File;
-  } catch {
-    return {
-      independentNodes: [],
-      renderDecisionNodes: [],
-      postRenderNodes: [],
-      jsxTree: null,
-      stateToJsxEdges: [],
-      refToJsxEdges: [],
-      propToJsxEdges: [],
-      variableNodes: [],
-      variableDependencyEdges: [],
-      variableToJsxEdges: [],
-      setterFlows: [],
-      effectMetas: [],
-      effectDependencyEdges: [],
-      effectToStateEdges: [],
-      effectToRefEdges: [],
-      externalCallEdges: [],
-      networkCalls: [],
-      errors: ["코드 파싱 실패. TSX 문법 오류 가능성 있음."],
-    };
-  }
+function collectImportMap(ast: t.File): ImportMap {
+  const map: ImportMap = {};
 
-  const independentNodes: RenderNode[] = [];
-  const renderDecisionNodes: StateNode[] = [];
-  const postRenderNodes: RenderNode[] = [];
-
-  const variableNodes: VariableNode[] = [];
-  const variableDependencyEdges: VariableDependencyEdge[] = [];
-  const variableToJsxEdges: VariableToJsxEdge[] = [];
-
-  const setterNameToStateName = new Map<string, string>();
-  const stateNames = new Set<string>();
-  const refNames = new Set<string>();
-  const globalVariableNames = new Set<string>();
-  const variableNames = new Set<string>();
-
-  const effectMetas: EffectMeta[] = [];
-  const effectDependencyEdges: EffectDependencyEdge[] = [];
-  const effectToStateEdges: EffectToStateEdge[] = [];
-  const effectToRefEdges: EffectToRefEdge[] = [];
-
-  const setterFlows: { fromSetter: string; toState: string }[] = [];
-  const externalCallEdges: ExternalCallEdge[] = [];
-  const networkCalls: NetworkCallMeta[] = [];
-
-  const externalFunctionNames = new Set<string>();
-
-  // 최상단 전역 변수 / 외부 함수 수집.
-  ast.program.body.forEach((statement) => {
-    if (statement.type === "VariableDeclaration") {
-      statement.declarations.forEach((declarator) => {
-        if (declarator.id.type === "Identifier") {
-          independentNodes.push({
-            id: `global-${declarator.id.name}`,
-            name: declarator.id.name,
-            kind: "globalVariable",
-            category: "independent",
-            description:
-              "파일 최상단 전역 변수로 렌더링과 직접적으로 독립적인 값으로 취급함.",
-          });
-          globalVariableNames.add(declarator.id.name);
-        }
-      });
-    }
-
-    if (statement.type === "FunctionDeclaration" && statement.id) {
-      const name = statement.id.name;
-      if (!/^[A-Z]/.test(name)) {
-        externalFunctionNames.add(name);
-      }
-    }
-  });
-
-  // useState, useRef, react-query, fetch, axios, useEffect 등 분석.
-  walk(ast.program as unknown as Node, (node, parent) => {
-    if (node.type === "VariableDeclaration") {
-      node.declarations.forEach((declarator) => {
-        if (
-          declarator.type === "VariableDeclarator" &&
-          declarator.id.type === "ArrayPattern" &&
-          declarator.init &&
-          declarator.init.type === "CallExpression" &&
-          declarator.init.callee.type === "Identifier"
-        ) {
-          const call = declarator.init as CallExpression;
-          const callee = call.callee as Identifier;
-          const calleeName = callee.name;
-          const firstElement = declarator.id.elements[0];
-          const secondElement = declarator.id.elements[1];
-
+  ast.program.body.forEach((node) => {
+    if (t.isImportDeclaration(node)) {
+      const src = node.source.value;
+      node.specifiers.forEach(
+        (
+          spec:
+            | t.ImportSpecifier
+            | t.ImportDefaultSpecifier
+            | t.ImportNamespaceSpecifier,
+        ) => {
           if (
-            calleeName === "useState" &&
-            firstElement &&
-            secondElement &&
-            firstElement.type === "Identifier" &&
-            secondElement.type === "Identifier"
+            t.isImportSpecifier(spec) ||
+            t.isImportDefaultSpecifier(spec) ||
+            t.isImportNamespaceSpecifier(spec)
           ) {
-            const stateName = firstElement.name;
-            const setterName = secondElement.name;
-
-            setterNameToStateName.set(setterName, stateName);
-            stateNames.add(stateName);
-
-            renderDecisionNodes.push({
-              id: `state-${stateName}`,
-              name: stateName,
-              kind: "useState",
-              category: "render-decision",
-              stateName,
-              setterName,
-              description:
-                "useState 훅으로 정의된 로컬 상태로 렌더링 결정 요소로 분류함.",
-            });
-          }
-        }
-
-        // useRef 분석(변수명 포함).
-        if (
-          declarator.type === "VariableDeclarator" &&
-          declarator.id.type === "Identifier" &&
-          declarator.init &&
-          declarator.init.type === "CallExpression" &&
-          declarator.init.callee.type === "Identifier" &&
-          declarator.init.callee.name === "useRef"
-        ) {
-          const refId = declarator.id as Identifier;
-          refNames.add(refId.name);
-          independentNodes.push({
-            id: `ref-${refId.name}`,
-            name: refId.name,
-            kind: "useRef",
-            category: "independent",
-            description:
-              "useRef로 선언된 ref 변수로, 값 변경 시 렌더링을 트리거하지 않는 요소로 분류함.",
-          });
-        }
-      });
-    }
-
-    if (node.type === "CallExpression" && node.callee.type === "Identifier") {
-      const callee = node.callee as Identifier;
-      const calleeName = callee.name;
-
-      // 리액트 쿼리 훅 추적.
-      const reactQueryNames = new Set<string>([
-        "useQuery",
-        "useInfiniteQuery",
-        "useMutation",
-        "useSuspenseQuery",
-        "useSuspenseInfiniteQuery",
-      ]);
-
-      if (reactQueryNames.has(calleeName)) {
-        const id = `reactQuery-${node.start ?? Math.random()}`;
-        postRenderNodes.push({
-          id,
-          name: calleeName,
-          kind: "reactQuery",
-          category: "post-render",
-          description:
-            "react-query 훅으로 서버 상태를 가져오는 비동기 호출을 나타냄.",
-        });
-        networkCalls.push({
-          nodeId: id,
-          kind: "reactQuery",
-          name: calleeName,
-        });
-        externalCallEdges.push({
-          fromNodeId: id,
-          label: calleeName,
-        });
-      }
-
-      // fetch 추적.
-      if (calleeName === "fetch") {
-        const id = `fetch-${node.start ?? Math.random()}`;
-        postRenderNodes.push({
-          id,
-          name: "fetch",
-          kind: "fetch",
-          category: "post-render",
-          description: "브라우저 fetch API 호출로 네트워크 요청을 나타냄.",
-        });
-        networkCalls.push({
-          nodeId: id,
-          kind: "fetch",
-          name: "fetch",
-        });
-        externalCallEdges.push({
-          fromNodeId: id,
-          label: "fetch",
-        });
-      }
-
-      // axios 추적.
-      if (calleeName === "axios") {
-        const id = `axios-${node.start ?? Math.random()}`;
-        postRenderNodes.push({
-          id,
-          name: "axios",
-          kind: "axios",
-          category: "post-render",
-          description: "axios 인스턴스를 통한 네트워크 요청을 나타냄.",
-        });
-        networkCalls.push({
-          nodeId: id,
-          kind: "axios",
-          name: "axios",
-        });
-        externalCallEdges.push({
-          fromNodeId: id,
-          label: "axios",
-        });
-      }
-
-      // useMemo, useCallback, useLayoutEffect 등 일반 후속 훅.
-      if (calleeName === "useMemo") {
-        postRenderNodes.push({
-          id: `useMemo-${node.start ?? Math.random()}`,
-          name: "useMemo",
-          kind: "useMemo",
-          category: "post-render",
-          description:
-            "렌더링 이후 계산 결과를 메모이제이션하는 후속 요소로 분류함.",
-        });
-      }
-
-      if (calleeName === "useCallback") {
-        postRenderNodes.push({
-          id: `useCallback-${node.start ?? Math.random()}`,
-          name: "useCallback",
-          kind: "useCallback",
-          category: "post-render",
-          description: "콜백 함수를 메모이제이션하는 후속 요소로 분류함.",
-        });
-      }
-
-      if (calleeName === "useLayoutEffect") {
-        postRenderNodes.push({
-          id: `useLayoutEffect-${node.start ?? Math.random()}`,
-          name: "useLayoutEffect",
-          kind: "useLayoutEffect",
-          category: "post-render",
-          description:
-            "레이아웃 계산 이후 동기적으로 실행되는 후속 요소로 분류함.",
-        });
-      }
-
-      // useEffect는 메타와 함께 별도 처리.
-      if (calleeName === "useEffect") {
-        const id = `useEffect-${node.start ?? Math.random()}`;
-
-        const effectMeta: EffectMeta = {
-          effectId: id,
-          dependencies: [],
-          writesStates: [],
-          writesRefs: [],
-        };
-
-        // 의존성 배열 분석.
-        if (node.arguments.length >= 2) {
-          const depsArg = node.arguments[1];
-          if (depsArg && depsArg.type === "ArrayExpression") {
-            depsArg.elements.forEach((el) => {
-              if (!el || el.type !== "Identifier") {
-                return;
-              }
-              effectMeta.dependencies.push(el.name);
-            });
-          }
-        }
-
-        // 콜백 내부에서 setState, ref 변경 추적.
-        if (node.arguments.length >= 1) {
-          const fnArg = node.arguments[0];
-          if (
-            fnArg &&
-            (fnArg.type === "ArrowFunctionExpression" ||
-              fnArg.type === "FunctionExpression")
-          ) {
-            const fnNode = fnArg;
-            walk(fnNode as unknown as Node, (innerNode) => {
-              if (
-                innerNode.type === "CallExpression" &&
-                innerNode.callee.type === "Identifier"
-              ) {
-                const setter = innerNode.callee as Identifier;
-                const setterName = setter.name;
-                const stateName = setterNameToStateName.get(setterName);
-                if (stateName) {
-                  effectMeta.writesStates.push(stateName);
-                }
-              }
-
-              if (
-                innerNode.type === "AssignmentExpression" &&
-                innerNode.left.type === "MemberExpression" &&
-                innerNode.left.object.type === "Identifier" &&
-                innerNode.left.property.type === "Identifier"
-              ) {
-                const refName = innerNode.left.object.name;
-                const propName = innerNode.left.property.name;
-                if (propName === "current" && refNames.has(refName)) {
-                  effectMeta.writesRefs.push(refName);
-                }
-              }
-            });
-          }
-        }
-
-        effectMetas.push(effectMeta);
-
-        postRenderNodes.push({
-          id,
-          name: "useEffect",
-          kind: "useEffect",
-          category: "post-render",
-          description:
-            "렌더링 이후 비동기 작업과 부수 효과를 수행하는 요소로 분류함.",
-        });
-      }
-    }
-  });
-
-  // useEffect 메타에서 엣지 생성.
-  effectMetas.forEach((meta) => {
-    meta.dependencies.forEach((depName) => {
-      if (stateNames.has(depName)) {
-        effectDependencyEdges.push({
-          stateName: depName,
-          effectId: meta.effectId,
-        });
-      }
-    });
-
-    meta.writesStates.forEach((stateName) => {
-      effectToStateEdges.push({
-        effectId: meta.effectId,
-        stateName,
-      });
-    });
-
-    meta.writesRefs.forEach((refName) => {
-      effectToRefEdges.push({
-        effectId: meta.effectId,
-        refName,
-      });
-    });
-  });
-
-  // setState 호출 → 상태 엣지 생성, 외부 함수 호출 기록.
-  walk(ast.program as unknown as Node, (node) => {
-    if (node.type === "CallExpression" && node.callee.type === "Identifier") {
-      const callee = node.callee as Identifier;
-      const calleeName = callee.name;
-
-      const stateName = setterNameToStateName.get(calleeName);
-      if (stateName) {
-        setterFlows.push({
-          fromSetter: calleeName,
-          toState: stateName,
-        });
-      }
-
-      if (externalFunctionNames.has(calleeName)) {
-        externalCallEdges.push({
-          fromNodeId: calleeName,
-          label: calleeName,
-        });
-      }
-    }
-  });
-
-  // 메인 컴포넌트 및 JSX 분석.
-  const mainComponent = findMainComponent(ast);
-  let jsxRootNode: Node | null = null;
-  let jsxTree: JsxTreeNode | null = null;
-
-  const jsxIdMap = new Map<Node, string>();
-  const propNames = mainComponent?.paramPropsNames ?? new Set<string>();
-
-  // 메인 컴포넌트 내부 변수 분석.
-  if (mainComponent) {
-    interface VariableInitInfo {
-      name: string;
-      initNode: Node | null;
-    }
-
-    const variableInfos: VariableInitInfo[] = [];
-
-    walk(mainComponent.fnNode as unknown as Node, (node, parent) => {
-      if (node.type === "VariableDeclaration") {
-        node.declarations.forEach((declarator) => {
-          if (
-            declarator.type === "VariableDeclarator" &&
-            declarator.id.type === "Identifier"
-          ) {
-            const name = declarator.id.name;
-
-            // 함수 표현식(핸들러 등)은 변수 영역에서 제외.
-            if (
-              declarator.init &&
-              (declarator.init.type === "ArrowFunctionExpression" ||
-                declarator.init.type === "FunctionExpression")
-            ) {
-              return;
+            if (t.isIdentifier(spec.local)) {
+              map[spec.local.name] = src;
             }
-
-            const initNode =
-              declarator.init && isNode(declarator.init)
-                ? (declarator.init as unknown as Node)
-                : null;
-
-            variableInfos.push({
-              name,
-              initNode,
-            });
           }
+        },
+      );
+    }
+  });
+
+  return map;
+}
+
+/**
+ * path.get(key) 결과를 단일 NodePath로 정리하는 헬퍼
+ * (NodePath | NodePath[] → NodePath | null)
+ */
+function getSingleSubPath(
+  path: NodePath<t.Node>,
+  key: string,
+): NodePath<t.Node> | null {
+  const sub = path.get(key) as NodePath<t.Node> | NodePath<t.Node>[];
+  if (Array.isArray(sub)) {
+    return sub[0] ?? null;
+  }
+  return sub;
+}
+
+/**
+ * useEffect / useLayoutEffect 분석
+ */
+function analyzeEffectCall(
+  path: NodePath<t.CallExpression>,
+  effectId: string,
+  hookKind: "useEffect" | "useLayoutEffect",
+  globalStateNames: Set<string>,
+): AnalyzedEffect {
+  const node = path.node;
+  const loc = node.loc;
+
+  const dependencies: EffectDependency[] = [];
+  const setters: string[] = [];
+  const refs: string[] = [];
+
+  const args = path.get("arguments") as NodePath<t.Expression>[];
+  const cbArgPath = args[0];
+  const depsArgPath = args[1];
+
+  if (depsArgPath && depsArgPath.isArrayExpression()) {
+    depsArgPath.node.elements.forEach((el) => {
+      if (t.isIdentifier(el)) {
+        dependencies.push({
+          name: el.name,
+          isGlobal: globalStateNames.has(el.name),
         });
       }
     });
-
-    // 변수 노드 및 이름 등록.
-    variableInfos.forEach((info) => {
-      variableNames.add(info.name);
-      variableNodes.push({
-        id: `var-${info.name}`,
-        name: info.name,
-        description:
-          "컴포넌트 내부에서 선언된 변수로, 상태/Ref/전역 값을 가공한 중간 값으로 분류함.",
-      });
-    });
-
-    // 변수 초기화 식에서 의존성 분석 → fromName → 변수.
-    variableInfos.forEach((info) => {
-      if (!info.initNode) return;
-      const deps = collectIdentifierNames(info.initNode);
-      deps.forEach((depName) => {
-        if (
-          stateNames.has(depName) ||
-          refNames.has(depName) ||
-          propNames.has(depName) ||
-          variableNames.has(depName) ||
-          globalVariableNames.has(depName)
-        ) {
-          variableDependencyEdges.push({
-            fromName: depName,
-            toVariableName: info.name,
-          });
-        }
-      });
-    });
   }
 
-  if (mainComponent) {
-    jsxRootNode = mainComponent.rootJsx;
-    jsxTree = buildJsxTree(jsxRootNode, jsxIdMap);
+  if (
+    cbArgPath &&
+    (cbArgPath.isArrowFunctionExpression() || cbArgPath.isFunctionExpression())
+  ) {
+    const bodyPathNode = getSingleSubPath(
+      cbArgPath as unknown as NodePath<t.Node>,
+      "body",
+    );
+
+    if (
+      bodyPathNode &&
+      (bodyPathNode.isBlockStatement() || bodyPathNode.isExpression())
+    ) {
+      bodyPathNode.traverse({
+        CallExpression(innerPath: NodePath<t.CallExpression>) {
+          const innerCallee = innerPath.node.callee;
+
+          if (
+            t.isIdentifier(innerCallee) &&
+            /^set[A-Z]/.test(innerCallee.name)
+          ) {
+            setters.push(innerCallee.name);
+          }
+
+          if (
+            t.isMemberExpression(innerCallee) &&
+            t.isIdentifier(innerCallee.property) &&
+            (innerCallee.property.name === "mutate" ||
+              innerCallee.property.name === "mutateAsync")
+          ) {
+            const obj = innerCallee.object;
+            if (t.isIdentifier(obj)) {
+              setters.push(`${obj.name}.${innerCallee.property.name}`);
+            }
+          }
+        },
+        MemberExpression(innerPath: NodePath<t.MemberExpression>) {
+          const obj = innerPath.node.object;
+          if (t.isIdentifier(obj) && obj.name.endsWith("Ref")) {
+            refs.push(obj.name);
+          }
+        },
+      });
+    }
   }
-
-  const {
-    stateToJsxEdges,
-    refToJsxEdges,
-    propToJsxEdges,
-    variableToJsxEdges: variableToJsxEdgesResult,
-  } = analyzeJsxUsages(
-    jsxRootNode,
-    jsxIdMap,
-    stateNames,
-    refNames,
-    propNames,
-    variableNames,
-  );
-
-  variableToJsxEdges.push(...variableToJsxEdgesResult);
 
   return {
-    independentNodes,
-    renderDecisionNodes,
-    postRenderNodes,
-    jsxTree,
-    stateToJsxEdges,
-    refToJsxEdges,
-    propToJsxEdges,
-    variableNodes,
-    variableDependencyEdges,
-    variableToJsxEdges,
-    setterFlows,
-    effectMetas,
-    effectDependencyEdges,
-    effectToStateEdges,
-    effectToRefEdges,
-    externalCallEdges,
-    networkCalls,
+    id: effectId,
+    hookKind,
+    dependencies,
+    setters: Array.from(new Set(setters)),
+    refs: Array.from(new Set(refs)),
+    definedAt: loc ? { line: loc.start.line, column: loc.start.column } : null,
+  };
+}
+
+/**
+ * useCallback 분석
+ */
+function analyzeUseCallbackCall(
+  path: NodePath<t.CallExpression>,
+  callbackId: string,
+): AnalyzedCallback {
+  const node = path.node;
+  const loc = node.loc;
+
+  const args = path.get("arguments") as NodePath<t.Expression>[];
+  const cbArgPath = args[0];
+  const depsArgPath = args[1];
+
+  const dependencies: string[] = [];
+  const setters: string[] = [];
+
+  if (depsArgPath && depsArgPath.isArrayExpression()) {
+    depsArgPath.node.elements.forEach((el) => {
+      if (t.isIdentifier(el)) {
+        dependencies.push(el.name);
+      }
+    });
+  }
+
+  if (
+    cbArgPath &&
+    (cbArgPath.isArrowFunctionExpression() || cbArgPath.isFunctionExpression())
+  ) {
+    const bodyPathNode = getSingleSubPath(
+      cbArgPath as unknown as NodePath<t.Node>,
+      "body",
+    );
+
+    if (
+      bodyPathNode &&
+      (bodyPathNode.isBlockStatement() || bodyPathNode.isExpression())
+    ) {
+      bodyPathNode.traverse({
+        CallExpression(innerPath: NodePath<t.CallExpression>) {
+          const innerCallee = innerPath.node.callee;
+          if (
+            t.isIdentifier(innerCallee) &&
+            /^set[A-Z]/.test(innerCallee.name)
+          ) {
+            setters.push(innerCallee.name);
+          }
+        },
+      });
+    }
+  }
+
+  let cbName: string | null = null;
+  const parent = path.parentPath;
+  if (parent.isVariableDeclarator() && t.isIdentifier(parent.node.id)) {
+    cbName = parent.node.id.name;
+  }
+
+  return {
+    id: callbackId,
+    name: cbName,
+    dependencies: Array.from(new Set(dependencies)),
+    setters: Array.from(new Set(setters)),
+    definedAt: loc ? { line: loc.start.line, column: loc.start.column } : null,
+  };
+}
+
+/**
+ * JSX 트리 분석
+ */
+function analyzeJsxTree(
+  rootPath: NodePath<t.Node>,
+  result: AnalyzedJsxNode[],
+): void {
+  function getJsxName(node: t.JSXOpeningElement | t.JSXClosingElement): string {
+    const name = node.name;
+
+    if (t.isJSXIdentifier(name)) return name.name;
+
+    if (t.isJSXMemberExpression(name)) {
+      const parts: string[] = [];
+      let current: t.JSXMemberExpression | t.JSXIdentifier = name;
+
+      while (t.isJSXMemberExpression(current)) {
+        if (t.isJSXIdentifier(current.property)) {
+          parts.unshift(current.property.name);
+        }
+        if (t.isJSXIdentifier(current.object)) {
+          parts.unshift(current.object.name);
+          break;
+        }
+        current = current.object as t.JSXMemberExpression | t.JSXIdentifier;
+      }
+      return parts.join(".");
+    }
+
+    if (t.isJSXNamespacedName(name)) {
+      const ns = t.isJSXIdentifier(name.namespace) ? name.namespace.name : "ns";
+      const id = t.isJSXIdentifier(name.name) ? name.name.name : "name";
+      return `${ns}:${id}`;
+    }
+
+    return "Unknown";
+  }
+
+  function traverseJsx(path: NodePath<t.JSXElement>, depth: number): void {
+    const opening = path.node.openingElement;
+    const loc = opening.loc;
+
+    const propIdentifiers: string[] = [];
+
+    opening.attributes.forEach(
+      (attr: t.JSXAttribute | t.JSXSpreadAttribute) => {
+        if (!t.isJSXAttribute(attr)) return;
+        const value = attr.value;
+        if (
+          t.isJSXExpressionContainer(value) &&
+          t.isIdentifier(value.expression)
+        ) {
+          propIdentifiers.push(value.expression.name);
+        }
+      },
+    );
+
+    result.push({
+      id: `jsx-${result.length + 1}`,
+      component: getJsxName(opening),
+      depth,
+      props: Array.from(new Set(propIdentifiers)),
+      definedAt: loc
+        ? { line: loc.start.line, column: loc.start.column }
+        : null,
+    });
+
+    path.traverse({
+      JSXElement(childPath: NodePath<t.JSXElement>) {
+        traverseJsx(childPath, depth + 1);
+      },
+    });
+  }
+
+  rootPath.traverse({
+    JSXElement(path: NodePath<t.JSXElement>) {
+      if (!path.parentPath.isJSXElement()) {
+        traverseJsx(path, 0);
+      }
+    },
+  });
+}
+
+/**
+ * 컴포넌트 body 내부 분석
+ */
+function analyzeComponentBody(
+  ast: t.File,
+  primaryComponentName: string | null,
+  importMap: ImportMap,
+): {
+  hooks: AnalyzedHook[];
+  effects: AnalyzedEffect[];
+  callbacks: AnalyzedCallback[];
+  jsxNodes: AnalyzedJsxNode[];
+} {
+  const hooks: AnalyzedHook[] = [];
+  const effects: AnalyzedEffect[] = [];
+  const callbacks: AnalyzedCallback[] = [];
+  const jsxNodes: AnalyzedJsxNode[] = [];
+
+  const globalStateNames = new Set<string>();
+
+  function isPrimaryComponent(
+    path: NodePath<t.FunctionDeclaration> | NodePath<t.VariableDeclarator>,
+  ): boolean {
+    if (!primaryComponentName) return false;
+
+    if (path.isFunctionDeclaration()) {
+      return Boolean(
+        path.node.id && path.node.id.name === primaryComponentName,
+      );
+    }
+
+    if (path.isVariableDeclarator()) {
+      return (
+        t.isIdentifier(path.node.id) &&
+        path.node.id.name === primaryComponentName
+      );
+    }
+
+    return false;
+  }
+
+  function inspectFunctionBody(bodyPath: NodePath<t.BlockStatement>): void {
+    analyzeJsxTree(bodyPath as unknown as NodePath<t.Node>, jsxNodes);
+
+    bodyPath.traverse({
+      VariableDeclarator(varPath: NodePath<t.VariableDeclarator>) {
+        const init = varPath.node.init;
+        if (!t.isCallExpression(init)) return;
+
+        const callee = init.callee;
+        if (!t.isIdentifier(callee)) return;
+
+        const localName = callee.name;
+        const source = importMap[localName] ?? null;
+        const hookKind = classifyHookKind(localName, source);
+
+        const loc = init.loc;
+        const id = varPath.node.id;
+
+        const names: string[] = [];
+        if (t.isIdentifier(id)) {
+          names.push(id.name);
+        } else if (t.isArrayPattern(id)) {
+          id.elements.forEach((el) => {
+            if (t.isIdentifier(el)) {
+              names.push(el.name);
+            }
+          });
+        } else if (t.isObjectPattern(id)) {
+          id.properties.forEach((prop) => {
+            if (t.isObjectProperty(prop) && t.isIdentifier(prop.value)) {
+              names.push(prop.value.name);
+            }
+          });
+        }
+
+        const scope: StateScope =
+          hookKind === "zustand" || hookKind === "react-query"
+            ? "global"
+            : "local";
+
+        names.forEach((name) => {
+          const hook: AnalyzedHook = {
+            id: `hook-${hooks.length + 1}`,
+            name,
+            hookKind,
+            scope,
+            definedAt: loc
+              ? { line: loc.start.line, column: loc.start.column }
+              : null,
+            meta: { importSource: source },
+          };
+          hooks.push(hook);
+
+          if (scope === "global") {
+            globalStateNames.add(name);
+          }
+        });
+      },
+
+      CallExpression(callPath: NodePath<t.CallExpression>) {
+        const callee = callPath.node.callee;
+        if (!t.isIdentifier(callee)) return;
+
+        const localName = callee.name;
+        const source = importMap[localName] ?? null;
+        const hookKind = classifyHookKind(localName, source);
+
+        if (hookKind === "useEffect" || hookKind === "useLayoutEffect") {
+          const effectId = `effect-${effects.length + 1}`;
+          const effect = analyzeEffectCall(
+            callPath,
+            effectId,
+            hookKind,
+            globalStateNames,
+          );
+          effects.push(effect);
+        }
+
+        if (hookKind === "useCallback") {
+          const callbackId = `callback-${callbacks.length + 1}`;
+          const cb = analyzeUseCallbackCall(callPath, callbackId);
+          callbacks.push(cb);
+        }
+      },
+    });
+  }
+
+  traverse(ast, {
+    FunctionDeclaration(path: NodePath<t.FunctionDeclaration>) {
+      if (!isPrimaryComponent(path)) return;
+
+      const bodyPathNode = getSingleSubPath(
+        path as unknown as NodePath<t.Node>,
+        "body",
+      );
+      if (bodyPathNode && bodyPathNode.isBlockStatement()) {
+        inspectFunctionBody(
+          bodyPathNode as unknown as NodePath<t.BlockStatement>,
+        );
+      }
+    },
+
+    VariableDeclarator(path: NodePath<t.VariableDeclarator>) {
+      if (!isPrimaryComponent(path)) return;
+
+      const init = path.node.init;
+      if (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) {
+        const initPath = path.get("init") as NodePath<
+          t.ArrowFunctionExpression | t.FunctionExpression
+        >;
+
+        const bodyPathNode = getSingleSubPath(
+          initPath as unknown as NodePath<t.Node>,
+          "body",
+        );
+
+        if (bodyPathNode && bodyPathNode.isBlockStatement()) {
+          inspectFunctionBody(
+            bodyPathNode as unknown as NodePath<t.BlockStatement>,
+          );
+        } else if (bodyPathNode && bodyPathNode.isExpression()) {
+          analyzeJsxTree(bodyPathNode as unknown as NodePath<t.Node>, jsxNodes);
+        }
+      }
+    },
+  });
+
+  return { hooks, effects, callbacks, jsxNodes };
+}
+
+/**
+ * 엔트리 함수
+ */
+export function analyzeReactComponent(
+  source: string,
+  fileName?: string,
+): ComponentAnalysis {
+  const ast = parseSourceToAst(source);
+  const importMap = collectImportMap(ast);
+  const exportInfo = collectExportedComponents(ast);
+  const primaryComponentName = pickPrimaryComponent(exportInfo, fileName);
+
+  const { hooks, effects, callbacks, jsxNodes } = analyzeComponentBody(
+    ast,
+    primaryComponentName,
+    importMap,
+  );
+
+  const errors: string[] = [];
+
+  return {
+    source,
+    fileName,
+    componentName: primaryComponentName,
+    hooks,
+    effects,
+    callbacks,
+    jsxNodes,
+    meta: {
+      exportedComponents: exportInfo.namedExports,
+      defaultExport: exportInfo.defaultExport,
+    },
     errors,
   };
 }

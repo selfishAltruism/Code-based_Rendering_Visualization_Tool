@@ -1,3 +1,4 @@
+// components/RenderGraphSvg.tsx
 "use client";
 
 import React, { useMemo } from "react";
@@ -6,11 +7,70 @@ import {
   buildGraphFromAnalysis,
   type GraphNode,
   type GraphEdge,
+  type GraphEdgeKind,
 } from "../libs/graphModel";
 
 interface RenderGraphSvgProps {
   analysis: ComponentAnalysis | null;
   svgRef: React.RefObject<SVGSVGElement | null>;
+}
+
+/**
+ * 두 점 사이를 부드러운 S자 곡선으로 연결하는 path 생성
+ */
+function buildCurvePath(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): string {
+  const mx = (x1 + x2) / 2;
+  const dy = y2 - y1;
+  const offset = Math.max(Math.min(dy * 0.3, 80), -80);
+
+  const c1x = mx;
+  const c1y = y1 + offset;
+  const c2x = mx;
+  const c2y = y2 - offset;
+
+  return `M ${x1} ${y1} C ${c1x} ${c1y} ${c2x} ${c2y} ${x2} ${y2}`;
+}
+
+/**
+ * edge 종류별 스타일
+ */
+function getEdgeStyle(kind: GraphEdgeKind): {
+  stroke: string;
+  dashed?: boolean;
+  markerId: string;
+} {
+  switch (kind) {
+    case "flow":
+      return {
+        stroke: "#8b5cf6", // 보라 계열
+        dashed: true,
+        markerId: "arrow-solid",
+      };
+    case "state-dependency":
+      return {
+        stroke: "#9ca3af", // 회색
+        dashed: true,
+        markerId: "arrow-muted",
+      };
+    case "state-mutation":
+      return {
+        stroke: "#b91c1c", // 붉은 계열
+        dashed: false,
+        markerId: "arrow-accent",
+      };
+    case "external":
+    default:
+      return {
+        stroke: "#6b7280",
+        dashed: true,
+        markerId: "arrow-muted",
+      };
+  }
 }
 
 export function RenderGraphSvg({ analysis, svgRef }: RenderGraphSvgProps) {
@@ -24,309 +84,181 @@ export function RenderGraphSvg({ analysis, svgRef }: RenderGraphSvgProps) {
   }
 
   if (!nodes.length) {
-    return <div className="text-sm text-neutral-500">노드가 없음.</div>;
+    return (
+      <div className="text-sm text-neutral-500">
+        분석 가능한 노드가 없습니다.
+      </div>
+    );
   }
 
-  const nodeMap = new Map<string, GraphNode>();
-  nodes.forEach((n) => nodeMap.set(n.id, n));
-
   return (
-    <svg
-      ref={svgRef}
-      role="img"
-      aria-label="React 렌더링 흐름 시각화 그래프."
-      width="100%"
-      className="h-full w-full"
-      viewBox={`0 0 ${width} ${height}`}
-    >
-      <defs>
-        {/* 기본 화살표 마커 정의. */}
-        <marker
-          id="arrow-solid"
-          markerWidth="8"
-          markerHeight="8"
-          refX="8"
-          refY="4"
-          orient="auto"
-        >
-          <path d="M0,0 L8,4 L0,8 z" fill="#4b5563" />
-        </marker>
-        <marker
-          id="arrow-accent"
-          markerWidth="8"
-          markerHeight="8"
-          refX="8"
-          refY="4"
-          orient="auto"
-        >
-          <path d="M0,0 L8,4 L0,8 z" fill="#b91c1c" />
-        </marker>
-        <marker
-          id="arrow-muted"
-          markerWidth="8"
-          markerHeight="8"
-          refX="8"
-          refY="4"
-          orient="auto"
-        >
-          <path d="M0,0 L8,4 L0,8 z" fill="#9ca3af" />
-        </marker>
-      </defs>
-
-      {/* 엣지 렌더링. */}
-      {edges.map((e: GraphEdge) => {
-        const from = nodeMap.get(e.from);
-        const to = nodeMap.get(e.to);
-        if (!from || !to) return null;
-
-        let startX = from.x;
-        let startY = from.y;
-        let endX = to.x;
-        let endY = to.y;
-
-        let stroke = "#9ca3af";
-        const strokeWidth = 1;
-        let dash: string | undefined;
-        let markerId = "url(#arrow-solid)";
-
-        if (e.kind === "flow") {
-          stroke = "#9ca3af";
-          dash = "4 2";
-          markerId = "url(#arrow-muted)";
-        } else if (e.kind === "stateToJsx") {
-          stroke = "#2563eb";
-          dash = "3 2";
-        } else if (e.kind === "refToJsx") {
-          stroke = "#10b981";
-          dash = "3 2";
-        } else if (e.kind === "propToJsx") {
-          stroke = "#8b5cf6";
-          dash = "3 2";
-        } else if (e.kind === "setterToState") {
-          stroke = "#b91c1c";
-          dash = "2 2";
-        } else if (e.kind === "stateToEffect") {
-          stroke = "#f97316";
-          dash = "3 2";
-        } else if (e.kind === "effectToState") {
-          stroke = "#dc2626";
-          dash = "2 2";
-        } else if (e.kind === "effectToRef") {
-          stroke = "#22c55e";
-          dash = "2 2";
-        } else if (e.kind === "stateToVariable") {
-          stroke = "#2563eb";
-          dash = "3 2";
-        } else if (e.kind === "refToVariable") {
-          stroke = "#10b981";
-          dash = "3 2";
-        } else if (e.kind === "variableToVariable") {
-          stroke = "#0f766e";
-          dash = "4 2";
-        } else if (e.kind === "globalToVariable") {
-          stroke = "#9ca3af";
-          dash = "3 2";
-        } else if (e.kind === "variableToJsx") {
-          stroke = "#0f766e";
-          dash = "2 2";
-        } else if (e.kind === "toExternalUp") {
-          // 위로 향하는 외부 호출 화살표 처리.
-          stroke = "#4b5563";
-          dash = "5 3";
-          markerId = "url(#arrow-muted)";
-          startX = from.x;
-          startY = from.y - 18;
-          endX = from.x;
-          endY = from.y - 80;
-        }
-
-        if (e.kind !== "toExternalUp") {
-          const dx = to.x - from.x;
-          const dy = to.y - from.y;
-          const angle = Math.atan2(dy, dx);
-          const offset = 40;
-
-          startX = from.x + Math.cos(angle) * (offset / 2);
-          startY = from.y + Math.sin(angle) * (offset / 2);
-          endX = to.x - Math.cos(angle) * (offset / 2);
-          endY = to.y - Math.sin(angle) * (offset / 2);
-        }
-
-        return (
-          <g key={e.id}>
-            <line
-              x1={startX}
-              y1={startY}
-              x2={endX}
-              y2={endY}
-              stroke={stroke}
-              strokeWidth={strokeWidth}
-              strokeDasharray={dash}
-              markerEnd={markerId}
-            />
-            {e.kind === "toExternalUp" && e.label && (
-              <text
-                x={startX}
-                y={endY - 4}
-                textAnchor="middle"
-                fontSize="9"
-                fill="#4b5563"
-              >
-                {e.label}
-              </text>
-            )}
-            {e.kind === "setterToState" && e.label && (
-              <text
-                x={(startX + endX) / 2}
-                y={(startY + endY) / 2 - 4}
-                textAnchor="middle"
-                fontSize="9"
-                fill="#b91c1c"
-              >
-                {e.label}
-              </text>
-            )}
-            {e.kind === "propToJsx" && e.label && (
-              <text
-                x={(startX + endX) / 2}
-                y={(startY + endY) / 2 - 4}
-                textAnchor="middle"
-                fontSize="9"
-                fill="#8b5cf6"
-              >
-                {e.label}
-              </text>
-            )}
-            {e.kind === "variableToJsx" && e.label && (
-              <text
-                x={(startX + endX) / 2}
-                y={(startY + endY) / 2 - 4}
-                textAnchor="middle"
-                fontSize="9"
-                fill="#0f766e"
-              >
-                {e.label}
-              </text>
-            )}
-          </g>
-        );
-      })}
-
-      {/* 노드 렌더링. */}
-      {nodes.map((node: GraphNode) => {
-        let fill = "#ffffff";
-        let stroke = "#4b5563";
-        const textFill = "#111827";
-
-        const radius = 6;
-        const widthNode = 128;
-        const heightNode = 32;
-
-        if (node.type === "independent") {
-          stroke = "#9ca3af";
-        } else if (node.type === "renderDecision") {
-          stroke = "#111827";
-        } else if (node.type === "variable") {
-          stroke = "#0f766e";
-          fill = "#ecfdf5";
-        } else if (node.type === "postRender") {
-          stroke = "#6b7280";
-        } else if (node.type === "jsx") {
-          stroke = "#2563eb";
-        }
-
-        // 네트워크 계열 색상 강조.
-        if (
-          node.kind === "reactQuery" ||
-          node.kind === "fetch" ||
-          node.kind === "axios"
-        ) {
-          fill = "#eff6ff";
-          stroke = "#1d4ed8";
-        }
-
-        if (node.kind === "useEffect") {
-          fill = "#fff7ed";
-          stroke = "#ea580c";
-        }
-
-        return (
-          <g
-            key={node.id}
-            transform={`translate(${node.x - widthNode / 2}, ${
-              node.y - heightNode / 2
-            })`}
+    <div className="h-full w-full overflow-auto rounded-md border bg-white">
+      <svg ref={svgRef} width={width} height={height} className="block">
+        {/* defs: arrow marker 정의 */}
+        <defs>
+          {/* 기본 흐름 화살표 */}
+          <marker
+            id="arrow-solid"
+            markerWidth="8"
+            markerHeight="8"
+            refX="7"
+            refY="4"
+            orient="auto"
+            markerUnits="strokeWidth"
           >
-            <rect
-              width={widthNode}
-              height={heightNode}
-              rx={radius}
-              ry={radius}
-              fill={fill}
-              stroke={stroke}
-              strokeWidth={1}
-            />
-            <text
-              x={widthNode / 2}
-              y={heightNode / 2 + 5}
-              textAnchor="middle"
-              fontSize="11"
-              className="select-none"
-              fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"
-              fill={textFill}
-            >
-              {node.label}
-            </text>
-          </g>
-        );
-      })}
+            <path d="M0,0 L8,4 L0,8 z" fill="#8b5cf6" />
+          </marker>
 
-      {/* 상단 컬럼 레이블. */}
-      <text
-        x={colX.independent}
-        y={32}
-        textAnchor="middle"
-        fontSize="12"
-        fill="#4b5563"
-      >
-        렌더링 독립
-      </text>
-      <text
-        x={colX.renderDecision}
-        y={32}
-        textAnchor="middle"
-        fontSize="12"
-        fill="#4b5563"
-      >
-        렌더링 결정 / Props
-      </text>
-      <text
-        x={colX.variable}
-        y={32}
-        textAnchor="middle"
-        fontSize="12"
-        fill="#4b5563"
-      >
-        변수
-      </text>
-      <text
-        x={colX.postRender}
-        y={32}
-        textAnchor="middle"
-        fontSize="12"
-        fill="#4b5563"
-      >
-        렌더링 후속
-      </text>
-      <text
-        x={colX.jsx}
-        y={32}
-        textAnchor="middle"
-        fontSize="12"
-        fill="#4b5563"
-      >
-        JSX
-      </text>
-    </svg>
+          {/* muted 화살표 */}
+          <marker
+            id="arrow-muted"
+            markerWidth="8"
+            markerHeight="8"
+            refX="7"
+            refY="4"
+            orient="auto"
+            markerUnits="strokeWidth"
+          >
+            <path d="M0,0 L8,4 L0,8 z" fill="#9ca3af" />
+          </marker>
+
+          {/* 상태 변경 강조 화살표 */}
+          <marker
+            id="arrow-accent"
+            markerWidth="8"
+            markerHeight="8"
+            refX="7"
+            refY="4"
+            orient="auto"
+            markerUnits="strokeWidth"
+          >
+            <path d="M0,0 L8,4 L0,8 z" fill="#b91c1c" />
+          </marker>
+        </defs>
+
+        {/* 컬럼 타이틀 */}
+        <g fontSize={11} fill="#4b5563">
+          <text x={colX.independent} y={40} textAnchor="middle">
+            렌더링 독립
+          </text>
+          <text x={colX.state} y={40} textAnchor="middle">
+            렌더링 결정 / 상태
+          </text>
+          <text x={colX.variable} y={40} textAnchor="middle">
+            변수 / 헬퍼
+          </text>
+          <text x={colX.effect} y={40} textAnchor="middle">
+            렌더링 후속
+          </text>
+          <text x={colX.jsx} y={40} textAnchor="middle">
+            JSX
+          </text>
+        </g>
+
+        {/* edge (곡선) */}
+        <g>
+          {edges.map((edge) => {
+            const style = getEdgeStyle(edge.kind);
+            const d = buildCurvePath(
+              edge.from.x,
+              edge.from.y,
+              edge.to.x,
+              edge.to.y,
+            );
+
+            const midX = (edge.from.x + edge.to.x) / 2;
+            const midY = (edge.from.y + edge.to.y) / 2;
+
+            return (
+              <g key={edge.id}>
+                <path
+                  d={d}
+                  fill="none"
+                  stroke={style.stroke}
+                  strokeWidth={1}
+                  strokeDasharray={style.dashed ? "3 2" : undefined}
+                  markerEnd={`url(#${style.markerId})`}
+                />
+                {edge.label && (
+                  <text
+                    x={midX}
+                    y={midY - 4}
+                    fontSize={9}
+                    textAnchor="middle"
+                    fill={style.stroke}
+                  >
+                    {edge.label}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </g>
+
+        {/* nodes */}
+        <g>
+          {nodes.map((node) => {
+            const radius = 6;
+            const rectX = node.x - node.width / 2;
+            const rectY = node.y - node.height / 2;
+
+            let fill = "#ffffff";
+            let stroke = "#d1d5db";
+
+            switch (node.kind) {
+              case "independent":
+                stroke = "#6b7280";
+                break;
+              case "state":
+                stroke = "#2563eb";
+                fill = "#eff6ff";
+                break;
+              case "effect":
+                stroke = "#8b5cf6";
+                fill = "#f5f3ff";
+                break;
+              case "jsx":
+                stroke = "#0f766e";
+                fill = "#ecfdf5";
+                break;
+              case "external":
+                stroke = "#9ca3af";
+                fill = "#f9fafb";
+                break;
+              case "variable":
+              default:
+                stroke = "#9ca3af";
+                fill = "#ffffff";
+                break;
+            }
+
+            return (
+              <g key={node.id}>
+                <rect
+                  x={rectX}
+                  y={rectY}
+                  rx={radius}
+                  ry={radius}
+                  width={node.width}
+                  height={node.height}
+                  fill={fill}
+                  stroke={stroke}
+                  strokeWidth={1}
+                />
+                <text
+                  x={node.x}
+                  y={node.y + 3}
+                  fontSize={11}
+                  textAnchor="middle"
+                  fill="#111827"
+                >
+                  {node.label}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+    </div>
   );
 }
