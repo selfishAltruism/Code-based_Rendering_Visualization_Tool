@@ -1,15 +1,13 @@
 "use client";
 
-import React, { useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   analyzeReactComponent,
   type ComponentAnalysis,
 } from "../libs/analyzeReactComponent";
 import { RenderGraphSvg } from "../entities/RenderGraphSvg";
 
-export default function Page() {
-  const [source, setSource] = useState<string>(
-    `import React, { useState, useEffect, useRef } from 'react';
+const SOURCE_INIT = `import React, { useState, useEffect, useRef } from 'react';
 
 function ExampleComponent() {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -28,8 +26,10 @@ function ExampleComponent() {
 }
 
 export default ExampleComponent;
-`,
-  );
+`;
+
+export default function Page() {
+  const [source, setSource] = useState<string>(SOURCE_INIT);
 
   const [analysis, setAnalysis] = useState<ComponentAnalysis | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -181,8 +181,8 @@ export default ExampleComponent;
       </section>
 
       <footer className="border-t border-neutral-200 bg-neutral-50">
-        <div className="mx-auto flex h-8 max-w-6xl items-center justify-between px-4 text-xs text-neutral-500">
-          <span>crv. | React Code-based Rendeing Visualization Tool</span>
+        <div className="mx-auto flex h-12 max-w-6xl flex-col items-start justify-center px-4 text-xs text-neutral-500">
+          <span>© 2025 crv. All rights reserved.</span>
           <a
             href="https://github.com/selfishAltruism"
             target="_blank"
