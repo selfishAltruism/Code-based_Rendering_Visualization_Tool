@@ -1,4 +1,4 @@
-// libs/analyzeReactComponent.ts
+// libs/mapping.ts
 import { parse } from "@babel/parser";
 import traverse, { type NodePath } from "@babel/traverse";
 import * as t from "@babel/types";
@@ -584,7 +584,7 @@ function analyzeComponentBody(
 /**
  * 엔트리 함수
  */
-export function analyzeReactComponent(
+export function mapping(
   source: string,
   fileName?: string,
 ): Mapping.MappingResult {

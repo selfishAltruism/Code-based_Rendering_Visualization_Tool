@@ -44,10 +44,10 @@ function layoutColumnNodes<
 /**
  * 분석 결과 → 그래프 레이아웃
  */
-export function buildGraphFromAnalysis(
-  analysis: Mapping.MappingResult | null,
+export function buildGraphFromMappingResult(
+  mappingResult: Mapping.MappingResult | null,
 ): BuildGraph.GraphLayout {
-  if (!analysis) {
+  if (!mappingResult) {
     const colX = buildColumnX();
     return {
       nodes: [],
@@ -63,7 +63,7 @@ export function buildGraphFromAnalysis(
   const edges: BuildGraph.GraphEdge[] = [];
 
   // 1. 독립 노드 (useRef)
-  const independentItems = analysis.hooks
+  const independentItems = mappingResult.hooks
     .filter((h) => h.hookKind === "useRef")
     .map((h) => ({
       id: h.id,
@@ -84,7 +84,7 @@ export function buildGraphFromAnalysis(
   nodes.push(...independentNodes);
 
   // 2. 상태 노드 (useState + 전역 상태)
-  const stateItems = analysis.hooks
+  const stateItems = mappingResult.hooks
     .filter((h) => ["useState", "zustand", "react-query"].includes(h.hookKind))
     .map((h) => ({
       id: h.id,
@@ -100,7 +100,7 @@ export function buildGraphFromAnalysis(
 
   // 3. effect / callback 노드
   const effectItems = [
-    ...analysis.effects.map((e) => ({
+    ...mappingResult.effects.map((e) => ({
       id: e.id,
       label: e.hookKind,
       meta: {
@@ -108,7 +108,7 @@ export function buildGraphFromAnalysis(
         ...e,
       } as Record<string, unknown>,
     })),
-    ...analysis.callbacks.map((cb) => ({
+    ...mappingResult.callbacks.map((cb) => ({
       id: cb.id,
       label: cb.name ?? "callback",
       meta: {
@@ -135,7 +135,7 @@ export function buildGraphFromAnalysis(
     meta?: Record<string, unknown>;
   };
 
-  const jsxLayoutItems: JsxLayoutItem[] = analysis.jsxNodes.map((jsx) => ({
+  const jsxLayoutItems: JsxLayoutItem[] = mappingResult.jsxNodes.map((jsx) => ({
     id: jsx.id, // AnalyzedJsxNode.id (예: "jsx-1")
     label: jsx.component,
     meta: {
@@ -218,7 +218,7 @@ export function buildGraphFromAnalysis(
   }
 
   // state → effect (의존성)
-  analysis.effects.forEach((effect) => {
+  mappingResult.effects.forEach((effect) => {
     const effectNode = effectNodes.find((n) => n.id === `effect-${effect.id}`);
     if (!effectNode) return;
 
@@ -272,7 +272,7 @@ export function buildGraphFromAnalysis(
   });
 
   // callback → state-mutation
-  analysis.callbacks.forEach((cb) => {
+  mappingResult.callbacks.forEach((cb) => {
     const cbNode = effectNodes.find((n) => n.id === `effect-${cb.id}`);
     if (!cbNode) return;
 
@@ -338,7 +338,7 @@ export function buildGraphFromAnalysis(
   const height = lastJsxY + 120;
 
   // JSX 부모–자식 관계 edge 추가
-  // analysis.jsxNodes의 id / parentId (논리 id)를
+  // mappingResult.jsxNodes의 id / parentId (논리 id)를
   // 그래프 노드 id(`jsx-${logicalId}`)로 매핑하여 연결
   const jsxNodeMap = new Map<string, BuildGraph.GraphNode>();
   jsxNodes.forEach((node) => {
@@ -347,7 +347,7 @@ export function buildGraphFromAnalysis(
     jsxNodeMap.set(logicalId, node);
   });
 
-  analysis.jsxNodes.forEach((jsx) => {
+  mappingResult.jsxNodes.forEach((jsx) => {
     if (!jsx.parentId) return; // 루트 JSX는 부모 없음
 
     const parentNode = jsxNodeMap.get(jsx.parentId);

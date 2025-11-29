@@ -80,7 +80,7 @@ declare namespace Mapping {
       defaultExport: string | null;
     };
 
-    // UI에서 analysis.errors.length, analysis.errors.map 사용
+    // UI에서 mappingResult.errors.length, mappingResult.errors.map 사용
     errors: string[];
   }
 }

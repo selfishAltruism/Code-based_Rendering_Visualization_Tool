@@ -2,22 +2,23 @@
 
 import { useRef, useState } from "react";
 
-import { analyzeReactComponent } from "@/shared/libs/mapping/mapping";
+import { mapping } from "@/shared/libs/mapping/mapping";
 import { RenderGraphSvg } from "@/entities/RenderGraphSvg";
 import { SOURCE_INIT } from "@/shared/consts";
 
 export default function Page() {
   const [source, setSource] = useState<string>(SOURCE_INIT);
 
-  const [analysis, setAnalysis] = useState<Mapping.MappingResult | null>(null);
+  const [mappingResult, setMappingResult] =
+    useState<Mapping.MappingResult | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const fullscreenSvgRef = useRef<SVGSVGElement | null>(null);
 
   const handleAnalyze = () => {
-    const result = analyzeReactComponent(source);
-    setAnalysis(result);
+    const result = mapping(source);
+    setMappingResult(result);
   };
 
   const handleDownloadSvg = () => {
@@ -48,7 +49,7 @@ export default function Page() {
   };
 
   const handleOpenFullscreen = () => {
-    if (!analysis) return;
+    if (!mappingResult) return;
     setIsFullscreen(true);
   };
 
@@ -126,7 +127,7 @@ export default function Page() {
                   <button
                     type="button"
                     onClick={handleOpenFullscreen}
-                    disabled={!analysis}
+                    disabled={!mappingResult}
                     className="rounded-md border border-neutral-300 bg-white px-3 py-1 text-sm text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     전체 화면
@@ -134,7 +135,7 @@ export default function Page() {
                   <button
                     type="button"
                     onClick={handleDownloadSvg}
-                    disabled={!analysis}
+                    disabled={!mappingResult}
                     className="rounded-md border border-neutral-300 bg-white px-3 py-1 text-sm text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     SVG 다운로드
@@ -142,15 +143,18 @@ export default function Page() {
                 </div>
               </div>
               <div className="min-h-0 flex-1 overflow-auto rounded-md border border-neutral-200 bg-neutral-50 p-2">
-                {analysis && analysis.errors.length > 0 && (
+                {mappingResult && mappingResult.errors.length > 0 && (
                   <div className="mb-2 rounded-md border border-red-300 bg-red-50 px-2 py-1 text-sm text-red-700">
-                    {analysis.errors.map((err, idx) => (
+                    {mappingResult.errors.map((err, idx) => (
                       <div key={idx}>{err}</div>
                     ))}
                   </div>
                 )}
                 <div className="h-full w-full">
-                  <RenderGraphSvg analysis={analysis} svgRef={svgRef} />
+                  <RenderGraphSvg
+                    mappingResult={mappingResult}
+                    svgRef={svgRef}
+                  />
                 </div>
               </div>
             </section>
@@ -184,7 +188,10 @@ export default function Page() {
             </button>
             <div className="mt-6 h-[calc(100%-2.5rem)] w-full overflow-auto rounded-md border border-neutral-200 bg-neutral-50 p-2">
               <div className="h-full w-full">
-                <RenderGraphSvg analysis={analysis} svgRef={fullscreenSvgRef} />
+                <RenderGraphSvg
+                  mappingResult={mappingResult}
+                  svgRef={fullscreenSvgRef}
+                />
               </div>
             </div>
           </div>

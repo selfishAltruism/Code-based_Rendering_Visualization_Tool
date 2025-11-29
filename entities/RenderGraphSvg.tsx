@@ -3,10 +3,10 @@
 
 import React, { useMemo } from "react";
 
-import { buildGraphFromAnalysis } from "@/shared/libs/buildGraph/buildGraph";
+import { buildGraphFromMappingResult } from "@/shared/libs/buildGraph/buildGraph";
 
 interface RenderGraphSvgProps {
-  analysis: Mapping.MappingResult | null;
+  mappingResult: Mapping.MappingResult | null;
   svgRef: React.RefObject<SVGSVGElement | null>;
 }
 
@@ -68,13 +68,13 @@ function getEdgeStyle(kind: BuildGraph.GraphEdgeKind): {
   }
 }
 
-export function RenderGraphSvg({ analysis, svgRef }: RenderGraphSvgProps) {
+export function RenderGraphSvg({ mappingResult, svgRef }: RenderGraphSvgProps) {
   const { nodes, edges, width, height, colX } = useMemo(
-    () => buildGraphFromAnalysis(analysis),
-    [analysis],
+    () => buildGraphFromMappingResult(mappingResult),
+    [mappingResult],
   );
 
-  if (!analysis) {
+  if (!mappingResult) {
     return <div className="text-sm text-neutral-500">코드 분석 결과 없음.</div>;
   }
 
