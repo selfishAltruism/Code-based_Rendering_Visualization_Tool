@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Download, Expand, Shrink } from "lucide-react";
+import { Download, Expand, X } from "lucide-react";
 
 import { mapping } from "@/shared/libs/mapping/mapping";
 import { RenderGraphSvg } from "@/entities/RenderGraphSvg";
@@ -193,7 +193,7 @@ export default function Page() {
               onClick={handleCloseFullscreen}
               className="absolute top-3 right-3 rounded-md text-sm text-neutral-700"
             >
-              <Shrink size={15} />
+              <X size={15} />
             </button>
             <div className="mt-7 h-[calc(100%-30px)] w-full overflow-auto rounded-md border border-neutral-200 bg-neutral-50 p-2">
               <div className="h-full w-full">

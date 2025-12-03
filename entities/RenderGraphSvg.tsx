@@ -372,18 +372,53 @@ export function RenderGraphSvg({ mappingResult, svgRef }: RenderGraphSvgProps) {
 
             if (!fromNode || !toNode) return null;
 
-            const { fromX, fromY, toX, toY } = getHorizontalAnchors(
-              fromNode,
-              toNode,
-            );
+            // 기본 앵커 (유틸 사용)
+            const baseAnchors = getHorizontalAnchors(fromNode, toNode);
+            let fromX = baseAnchors.fromX;
+            const fromY = baseAnchors.fromY;
+            let toX = baseAnchors.toX;
+            const toY = baseAnchors.toY;
+
+            // 방향 판정은 노드 중심 기준
+            // const isLeftToRight = fromNode.x < toNode.x;
+            const isRightToLeft = fromNode.x > toNode.x;
+
+            // 우측 → 좌측인 경우, 노드 "안쪽" 테두리 기준으로 앵커 재조정
+            if (isRightToLeft) {
+              const fromLeft = fromNode.x - fromNode.width / 2; // 오른쪽 노드의 왼쪽 테두리
+              const toRight = toNode.x + toNode.width / 2; // 왼쪽 노드의 오른쪽 테두리
+
+              fromX = fromLeft;
+              toX = toRight;
+              // fromY, toY는 baseAnchors 사용 (세로 정렬 유지)
+            }
+
+            // 곡선 세기
+            const curveOffset = 0.1 * (toX - fromX);
+            const midX = (fromX + toX) / 2;
+
+            const c1x = midX;
+            const c2x = midX;
+            let c1y = fromY;
+            let c2y = toY;
+
+            /* if (isLeftToRight || isRightToLeft) { */
+            // 좌 → 우 : 위쪽으로 둥글게
+            c1y = fromY - curveOffset;
+            c2y = toY - curveOffset;
+            /* } else if (isRightToLeft) {
+              // 우 → 좌 : 아래쪽으로 둥글게
+              c1y = fromY + curveOffset;
+              c2y = toY + curveOffset;
+            } */
+
+            const d = `M ${fromX} ${fromY} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${toX} ${toY}`;
 
             return (
-              <line
+              <path
                 key={edge.id}
-                x1={fromX}
-                y1={fromY}
-                x2={toX}
-                y2={toY}
+                d={d}
+                fill="none"
                 stroke={style.stroke}
                 strokeWidth={1.2}
                 strokeDasharray={style.dashed ? "3 2" : undefined}
