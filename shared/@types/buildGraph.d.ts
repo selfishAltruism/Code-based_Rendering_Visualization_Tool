@@ -11,7 +11,8 @@ declare namespace BuildGraph {
     | "flow"
     | "state-dependency"
     | "state-mutation"
-    | "external";
+    | "external"
+    | "state-link";
 
   export interface GraphNode {
     id: string;

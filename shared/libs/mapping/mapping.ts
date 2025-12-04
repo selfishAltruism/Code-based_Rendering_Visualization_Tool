@@ -422,6 +422,7 @@ function analyzeComponentBody(
   effects: Mapping.AnalyzedEffect[];
   callbacks: Mapping.AnalyzedCallback[];
   jsxNodes: Mapping.AnalyzedJsxNode[];
+  calledVariableNames: string[]; // ← 추가
 } {
   const hooks: Mapping.AnalyzedHook[] = [];
   const effects: Mapping.AnalyzedEffect[] = [];
@@ -429,6 +430,9 @@ function analyzeComponentBody(
   const jsxNodes: Mapping.AnalyzedJsxNode[] = [];
 
   const globalStateNames = new Set<string>();
+
+  // 1단계: 함수 호출된 변수 이름을 모을 Set
+  const calledVariableNames = new Set<string>();
 
   function isPrimaryComponent(
     path: NodePath<t.FunctionDeclaration> | NodePath<t.VariableDeclarator>,
@@ -515,6 +519,11 @@ function analyzeComponentBody(
         if (!t.isIdentifier(callee)) return;
 
         const localName = callee.name;
+
+        // 1단계: 이 변수가 실제로 () 호출된 것임을 기록
+        calledVariableNames.add(localName);
+
+        // 기존 hookKind 분석 로직은 그대로 유지
         const source = importMap[localName] ?? null;
         const hookKind = classifyHookKind(localName, source);
 
@@ -578,7 +587,13 @@ function analyzeComponentBody(
     },
   });
 
-  return { hooks, effects, callbacks, jsxNodes };
+  return {
+    hooks,
+    effects,
+    callbacks,
+    jsxNodes,
+    calledVariableNames: Array.from(calledVariableNames),
+  };
 }
 
 /**
@@ -593,11 +608,8 @@ export function mapping(
   const exportInfo = collectExportedComponents(ast);
   const primaryComponentName = pickPrimaryComponent(exportInfo, fileName);
 
-  const { hooks, effects, callbacks, jsxNodes } = analyzeComponentBody(
-    ast,
-    primaryComponentName,
-    importMap,
-  );
+  const { hooks, effects, callbacks, jsxNodes, calledVariableNames } =
+    analyzeComponentBody(ast, primaryComponentName, importMap);
 
   const errors: string[] = [];
 
@@ -614,5 +626,6 @@ export function mapping(
       defaultExport: exportInfo.defaultExport,
     },
     errors,
+    calledVariableNames,
   };
 }

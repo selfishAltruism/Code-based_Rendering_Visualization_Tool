@@ -82,5 +82,7 @@ declare namespace Mapping {
 
     // UI에서 mappingResult.errors.length, mappingResult.errors.map 사용
     errors: string[];
+
+    calledVariableNames: string[];
   }
 }

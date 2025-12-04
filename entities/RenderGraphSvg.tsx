@@ -16,6 +16,245 @@ type GraphLayout = ReturnType<typeof buildGraphFromMappingResult>;
 type GraphNode = GraphLayout["nodes"][number];
 type GraphEdge = GraphLayout["edges"][number];
 
+const STATE_FN_OFFSET_X = 70;
+
+type AnalyzedHook = Mapping.AnalyzedHook;
+
+/**
+ * useState 쌍(state / setter)을 그룹화하고,
+ * 나머지 hook 들은 개별 state 또는 함수로 분류하기 위한 헬퍼.
+ */
+function buildStateFunctionRows(
+  mappingResult: Mapping.MappingResult | null,
+  nodeList: GraphNode[],
+): {
+  rows: {
+    orderKey: number;
+    stateNode?: GraphNode;
+    fnNode?: GraphNode;
+  }[];
+} {
+  if (!mappingResult) {
+    return { rows: [] };
+  }
+
+  const hooks = mappingResult.hooks ?? [];
+  if (!hooks.length) {
+    return { rows: [] };
+  }
+
+  // state 컬럼의 노드만 대상으로 함
+  const stateNodes = nodeList.filter((n) => n.kind === "state");
+  if (!stateNodes.length) {
+    return { rows: [] };
+  }
+
+  // hook.id → GraphNode 매핑 (state 컬럼의 노드만)
+  const nodeByHookId = new Map<string, GraphNode>();
+  for (const node of stateNodes) {
+    if (node.id.startsWith("state-")) {
+      const hookId = node.id.slice("state-".length);
+      nodeByHookId.set(hookId, node);
+    }
+  }
+
+  // hook.id → 원래 인덱스 (row 정렬 기준)
+  const hookIndexById = new Map<string, number>();
+  hooks.forEach((h, idx) => {
+    hookIndexById.set(h.id, idx);
+  });
+
+  type Row = { orderKey: number; stateNode?: GraphNode; fnNode?: GraphNode };
+  const rows: Row[] = [];
+  const pairedHookIds = new Set<string>();
+
+  // 1) useState 쌍 감지 (definedAt line/column 동일 + 이름 패턴)
+  const groupedByLoc = new Map<string, AnalyzedHook[]>();
+
+  hooks.forEach((hook) => {
+    if (hook.hookKind !== "useState") return;
+    if (!hook.definedAt) return;
+    const key = `${hook.definedAt.line}:${hook.definedAt.column}`;
+    const list = groupedByLoc.get(key);
+    if (list) list.push(hook);
+    else groupedByLoc.set(key, [hook]);
+  });
+
+  groupedByLoc.forEach((group) => {
+    if (group.length < 2) return;
+
+    const valueHooks = group.filter((h) => !h.name.startsWith("set"));
+    const setterHooks = group.filter((h) => h.name.startsWith("set"));
+
+    if (valueHooks.length !== 1 || setterHooks.length !== 1) {
+      return;
+    }
+
+    const valueHook = valueHooks[0];
+    const setterHook = setterHooks[0];
+
+    const valueNode = nodeByHookId.get(valueHook.id);
+    const setterNode = nodeByHookId.get(setterHook.id);
+
+    if (!valueNode && !setterNode) return;
+
+    const idxA = hookIndexById.get(valueHook.id) ?? Number.MAX_SAFE_INTEGER;
+    const idxB = hookIndexById.get(setterHook.id) ?? Number.MAX_SAFE_INTEGER;
+
+    rows.push({
+      orderKey: Math.min(idxA, idxB),
+      stateNode: valueNode,
+      fnNode: setterNode,
+    });
+
+    pairedHookIds.add(valueHook.id);
+    pairedHookIds.add(setterHook.id);
+  });
+
+  // 2) 나머지 hook 을 개별 state / 함수 row 로 분배
+  hooks.forEach((hook, idx) => {
+    if (pairedHookIds.has(hook.id)) return;
+
+    const node = nodeByHookId.get(hook.id);
+    if (!node) return;
+
+    const calledSet = new Set(mappingResult.calledVariableNames);
+
+    const isFunction = calledSet.has(hook.name); // 호출 여부로만 판별
+    if (isFunction) {
+      rows.push({
+        orderKey: idx,
+        fnNode: node,
+      });
+    } else {
+      rows.push({
+        orderKey: idx,
+        stateNode: node,
+      });
+    }
+  });
+
+  rows.sort((a, b) => a.orderKey - b.orderKey);
+
+  return { rows };
+}
+
+/**
+ * 상태 / 함수 전용 레이아웃
+ * - 왼쪽: state 컬럼
+ * - 오른쪽: 함수 컬럼 (setXXX, 전역 store 함수 등)
+ * - [state, setXXX] = useState(...) 쌍은 같은 row 에 배치하고
+ *   두 노드를 직선 edge 로 연결할 수 있도록 한다.
+ */
+function applyStateFunctionLayout(
+  layout: GraphLayout,
+  mappingResult: Mapping.MappingResult | null,
+): GraphLayout {
+  if (!mappingResult) return layout;
+
+  const { nodes, edges, width, height, colX } = layout;
+
+  const stateNodes = nodes.filter((n) => n.kind === "state");
+  if (!stateNodes.length) {
+    return layout;
+  }
+
+  const { rows } = buildStateFunctionRows(mappingResult, nodes);
+  if (!rows.length) {
+    return layout;
+  }
+
+  // 기존 노드 복사본으로 작업
+  const nextNodes: GraphNode[] = nodes.map((n) => ({ ...n }));
+  const nodeById = new Map<string, GraphNode>();
+  nextNodes.forEach((n) => nodeById.set(n.id, n));
+
+  const stateColX = colX.state - STATE_FN_OFFSET_X;
+  const fnColX = colX.state + STATE_FN_OFFSET_X;
+
+  const baseY = 80;
+  const gapY = 40;
+
+  rows.forEach((row, rowIndex) => {
+    const y = baseY + rowIndex * gapY;
+
+    if (row.stateNode) {
+      const n = nodeById.get(row.stateNode.id);
+      if (n) {
+        n.x = stateColX;
+        n.y = y;
+      }
+    }
+
+    if (row.fnNode) {
+      const n = nodeById.get(row.fnNode.id);
+      if (n) {
+        n.x = fnColX;
+        n.y = y;
+      }
+    }
+  });
+
+  // edge 재정렬 (노드 위치 변경 반영)
+  const nextEdges: GraphEdge[] = edges.map((edge) => {
+    const fromNode = nodeById.get(edge.from.nodeId);
+    const toNode = nodeById.get(edge.to.nodeId);
+
+    if (!fromNode && !toNode) return edge;
+
+    return {
+      ...edge,
+      from: fromNode
+        ? {
+            ...edge.from,
+            x: fromNode.x,
+            y: fromNode.y,
+          }
+        : edge.from,
+      to: toNode
+        ? {
+            ...edge.to,
+            x: toNode.x,
+            y: toNode.y,
+          }
+        : edge.to,
+    };
+  });
+
+  // state / 함수 쌍 사이에 직접 edge 추가 (수평 직선)
+  rows.forEach((row, rowIndex) => {
+    if (!row.stateNode || !row.fnNode) return;
+
+    const stateNode = nodeById.get(row.stateNode.id);
+    const fnNode = nodeById.get(row.fnNode.id);
+    if (!stateNode || !fnNode) return;
+
+    nextEdges.push({
+      id: `state-link-${fnNode.id}-${stateNode.id}-${rowIndex}`,
+      from: {
+        nodeId: fnNode.id, // set 함수가 출발점
+        x: fnNode.x,
+        y: fnNode.y,
+      },
+      to: {
+        nodeId: stateNode.id, // state가 도착점
+        x: stateNode.x,
+        y: stateNode.y,
+      },
+      kind: "state-link",
+      label: "",
+    });
+  });
+
+  return {
+    nodes: nextNodes,
+    edges: nextEdges,
+    width,
+    height,
+    colX,
+  };
+}
+
 /**
  * JSX 노드들을
  * - depth 기준으로 가로(오른쪽) 방향 확장
@@ -185,33 +424,17 @@ function applyJsxTreeLayout(layout: GraphLayout): GraphLayout {
   };
 }
 
-/**
- * 두 점 사이를 부드러운 S자 곡선으로 연결하는 path 생성
- */
-function buildCurvePath(
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-): string {
-  const mx = (x1 + x2) / 2;
-  const dy = y2 - y1;
-  const offset = Math.max(Math.min(dy * 0.3, 80), -80);
-
-  const c1x = mx;
-  const c1y = y1 + offset;
-  const c2x = mx;
-  const c2y = y2 - offset;
-
-  return `M ${x1} ${y1} C ${c1x} ${c1y} ${c2x} ${c2y} ${x2} ${y2}`;
-}
-
 export function RenderGraphSvg({ mappingResult, svgRef }: RenderGraphSvgProps) {
   const { nodes, edges, width, height, colX } = useMemo(() => {
     const base = buildGraphFromMappingResult(mappingResult);
-    // JSX 영역 트리 레이아웃 적용
-    return applyJsxTreeLayout(base);
+    // 1단계: 상태 / 함수 컬럼 레이아웃
+    const withStateLayout = applyStateFunctionLayout(base, mappingResult);
+    // 2단계: JSX 영역 트리 레이아웃 적용
+    return applyJsxTreeLayout(withStateLayout);
   }, [mappingResult]);
+
+  const stateColX = colX.state - STATE_FN_OFFSET_X;
+  const fnColX = colX.state + STATE_FN_OFFSET_X;
 
   // RenderGraphSvg.tsx 상단부 (컴포넌트 내부)
   const nodeMap = useMemo(
@@ -278,24 +501,44 @@ export function RenderGraphSvg({ mappingResult, svgRef }: RenderGraphSvgProps) {
           >
             <path d="M0,0 L8,4 L0,8 z" fill="#b91c1c" />
           </marker>
+
+          <marker
+            id="arrow-gray"
+            markerWidth="8"
+            markerHeight="8"
+            refX="7"
+            refY="4"
+            orient="auto"
+            markerUnits="strokeWidth"
+          >
+            <path d="M0,0 L8,4 L0,8 z" fill="#4686df" />
+          </marker>
         </defs>
 
         {/* 컬럼 타이틀 */}
         <g fontSize={11} fill="#4b5563">
-          <text x={colX.independent} y={40} textAnchor="middle">
+          <text x={colX.independent} y={32} textAnchor="middle">
             렌더링 독립
           </text>
-          <text x={colX.state} y={40} textAnchor="middle">
+          <text x={colX.state} y={32} textAnchor="middle">
             렌더링 결정 / 상태
           </text>
-          <text x={colX.variable} y={40} textAnchor="middle">
+          <text x={colX.variable} y={32} textAnchor="middle">
             변수 / 헬퍼
           </text>
-          <text x={colX.effect} y={40} textAnchor="middle">
+          <text x={colX.effect} y={32} textAnchor="middle">
             렌더링 후속
           </text>
-          <text x={colX.jsx} y={40} textAnchor="middle">
+          <text x={colX.jsx} y={32} textAnchor="middle">
             JSX
+          </text>
+
+          {/* 상태 / 함수 서브 컬럼 */}
+          <text x={stateColX} y={48} textAnchor="middle" fontSize={10}>
+            state
+          </text>
+          <text x={fnColX} y={48} textAnchor="middle" fontSize={10}>
+            함수
           </text>
         </g>
 

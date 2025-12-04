@@ -22,6 +22,12 @@ export function getEdgeStyle(kind: BuildGraph.GraphEdgeKind): {
         dashed: false,
         markerId: "arrow-accent",
       };
+    case "state-link":
+      return {
+        stroke: "#4686df",
+        dashed: false,
+        markerId: "arrow-gray",
+      };
     case "external":
     default:
       return {
